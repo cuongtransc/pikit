@@ -400,6 +400,8 @@ test("virtual footer remains width-bounded on narrow terminals", async (t) => {
 
 // ── Model alias target ──────────────────────────────────────────────────────
 const aliasConfig = { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [] };
+const aliasRightConfig = { ...statsConfig, row1LeftSegments: ["model"], row1RightSegments: ["text:RIGHT-ANCHOR"],
+  row2LeftSegments: [], row2RightSegments: [] };
 function selectAlias(f, name = "implementer-medium") {
   f.ctx.model = { id: name, name, provider: "alias", reasoning: true, contextWindow: 1000000 };
 }
@@ -457,6 +459,23 @@ test("alias footer stays width-bounded when the theme emits ANSI styling", async
     assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
   }
   assert.ok(f.rawRender(80).some((line) => line.includes("\x1b[")), "styled output carries ANSI escapes");
+});
+
+test("alias footer keeps right-side segments and width bounds under a long target", async (t) => {
+  const f = await fixture(t, { config: aliasRightConfig, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [40, 60, 80, 120]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+    const row1 = lines[1].replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(row1, /RIGHT-ANCHOR/, `right side preserved at width ${width}`);
+  }
+  for (const width of [60, 80, 120]) {
+    const row1 = f.rawRender(width)[1].replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(row1, /\u2192 deepseek-v4\.1-flash/, `alias target retained at width ${width}`);
+  }
 });
 
 // Pins the producer contract this parser depends on:
