@@ -21,7 +21,8 @@ function isFallbackTarget(
 export const modelSegment = {
   id: "model" as const,
   render(ctx: SegmentContext): RenderedSegment {
-    let modelName = ctx.model?.name || ctx.model?.id || "no-model";
+    const selectedName = ctx.model?.name || ctx.model?.id || "no-model";
+    let modelName = selectedName;
 
     if (modelName.startsWith("Claude ")) {
       modelName = modelName.slice(7);
@@ -37,9 +38,10 @@ export const modelSegment = {
       const aliasLabels = ctx.options.model?.aliasLabels;
       if (aliasLabels !== undefined && aliasLabels !== null) {
         // Short-label mode: `<label>→<model>`, or `<label>↓<model>` when the
-        // served target is a fallback past the head of the alias chain.
-        const label = aliasLabels[modelName] ?? modelName;
-        const fallback = isFallbackTarget(modelName, ctx.aliasStatus);
+        // served target is a fallback past the head of the alias chain. Look
+        // aliases up by their real id, before the display-only Claude-prefix strip.
+        const label = Object.hasOwn(aliasLabels, selectedName) ? aliasLabels[selectedName] : selectedName;
+        const fallback = isFallbackTarget(selectedName, ctx.aliasStatus);
         const arrow = applyColor(ctx.theme, "dim", fallback ? "↓" : "→");
         const target = fallback
           ? applyColor(ctx.theme, "warning", ctx.aliasStatus.target)

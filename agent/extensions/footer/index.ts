@@ -67,12 +67,18 @@ function buildFooterContent(
   // Render right segments
   const rightParts: string[] = [];
   let rightWidth = 0;
+  let previousRightSegId: StatusLineSegmentId | undefined;
   for (const segId of rightSegments) {
     const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
-    if (visible) {
+    if (!visible) continue;
+    if (compactThinking && segId === "thinking" && rightParts.length > 0 && isThinkingMarker(previousRightSegId)) {
+      rightParts[rightParts.length - 1] += content;
+      rightWidth += width; // glued: no space between marker and level
+    } else {
       rightParts.push(content);
       rightWidth += width + 1; // +1 for space between
     }
+    previousRightSegId = segId;
   }
   if (rightParts.length > 0) {
     rightWidth -= 1; // Remove trailing space

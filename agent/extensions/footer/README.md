@@ -94,8 +94,10 @@ enables the fallback marker:
   agent dir). When the target in the `model-alias` status is not the first ref in that alias's
   chain, it renders `label↓model` with the model in the `warning` colour. A target that is the
   chain head, absent from a readable chain, or served while the map is missing or malformed keeps
-  the plain `label→model`. The parsed map is cached and re-read only when the file's mtime or
-  size changes.
+  the plain `label→model`. The parsed map is cached and re-read only when the file's mtime, size
+  or mode changes; a failed read is never cached, so a transient failure or a fixed permission
+  recovers on the next render. A chain containing a ref the producer would reject makes the map
+  malformed, which also keeps the plain arrow.
 
 ```json
 {

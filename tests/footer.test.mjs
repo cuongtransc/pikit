@@ -622,6 +622,22 @@ test("compact alias rendering stays width-bounded on narrow terminals", async (t
   }
 });
 
+test("a malformed chain ref leaves the plain arrow", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["NOT-A-REF", "openai-codex/gpt-6-sol"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("an alias named like an Object property keeps its full name", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [],
+    segmentOptions: { model: { aliasLabels: {} } } }, aliasMap: { constructor: ["p/head", "p/fallback"] } });
+  selectAlias(f, "constructor");
+  f.state.statuses.set("model-alias", "p/head");
+  assert.equal(f.render()[1], "constructor\u2192head");
+});
+
 const compactThinkingConfig = {
   ...statsConfig,
   row1LeftSegments: ["text:\u26a1", "thinking"],
@@ -633,6 +649,16 @@ test("compactThinking joins the \u26a1 marker to the thinking level", async (t) 
   const f = await fixture(t, { config: compactThinkingConfig });
   f.state.thinking = "low";
   assert.equal(f.render()[1], "\u26a1low");
+});
+
+test("compactThinking joins the \u26a1 marker on a right-side row", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["text:LEFT"],
+    row1RightSegments: ["text:\u26a1", "thinking"], row2LeftSegments: [], row2RightSegments: [],
+    segmentOptions: { model: { compactThinking: true } } } });
+  f.state.thinking = "low";
+  const row1 = f.render()[1];
+  assert.match(row1, /\u26a1low$/);
+  assert.doesNotMatch(row1, /\u26a1 low/);
 });
 
 test("thinking keeps its space when compactThinking is off", async (t) => {
