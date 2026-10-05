@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 // Exercise the real Pi loader/jiti without changing the project's dev dependencies.
 const piDir = process.env.PI_TEST_CODING_AGENT_DIR
@@ -27,7 +28,7 @@ function assistant(id, stopReason = "stop", input = 10) {
       stopReason, usage: usage(input) } };
 }
 
-async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true } = {}) {
+async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
   process.env.HOME = root;
@@ -61,7 +62,10 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const loaded = await loadExtensions([extensionPath], root);
   assert.deepEqual(loaded.errors, []);
   loaded.runtime.getThinkingLevel = () => state.thinking;
-  const theme = { fg: (name, text) => { state.themeCalls.push([name, text]); return text; } };
+  const theme = { fg: (name, text) => {
+    state.themeCalls.push([name, text]);
+    return ansiTheme ? `\x1b[38;5;8m${text}\x1b[0m` : text;
+  } };
   let component;
   const ctx = {
     cwd: root, hasUI: true, mode: "tui", sessionManager: manager,
@@ -84,7 +88,8 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     },
     render: (width = 240, trim = true) => component.render(width)
       .map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""))
-      .map((line) => trim ? line.trim() : line) };
+      .map((line) => trim ? line.trim() : line),
+    rawRender: (width = 240) => component.render(width) };
 }
 
 for (const layout of ["default", "example"]) {
@@ -440,6 +445,28 @@ test("alias footer truncates the target and cooldown to the available width", as
   assert.match(narrow, /implementer-medium \u2192 deepseek/);
   assert.doesNotMatch(narrow, /gpt-6-luna/);
   assert.match(narrow, /\.\.\.$/);
+});
+
+test("alias footer stays width-bounded when the theme emits ANSI styling", async (t) => {
+  const f = await fixture(t, { config: aliasConfig, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [24, 40, 80]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+  }
+  assert.ok(f.rawRender(80).some((line) => line.includes("\x1b[")), "styled output carries ANSI escapes");
+});
+
+// Pins the producer contract this parser depends on:
+// `<provider/model> · cooldown: <ref> <n>m, <ref> <n>m` (see
+// pi-model-fallback-alias/src/status/status.ts formatFooterStatus).
+test("alias footer parses the producer's provider/model \u00b7 cooldown format", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m, other-provider/other-model 12m");
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m, other-provider/other-model 12m");
 });
 
 test("alias without a published status keeps the plain (alias) provider text", async (t) => {
