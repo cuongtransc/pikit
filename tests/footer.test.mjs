@@ -42,6 +42,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const state = {
     entries, branch: [assistant("active")], sessionId: "session-a", leafId: "leaf-a",
     thinking: "high", scans: 0, reads: 0, branchReads: 0, contextReads: 0,
+    statuses: new Map(),
     context: { tokens: 800, contextWindow: 2000, percent: 40 },
   };
   const manager = {
@@ -69,7 +70,8 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     getContextUsage: () => { state.contextReads++; return state.context; },
     ui: { setFooter: (factory) => {
       component = factory({ requestRender() {} }, theme,
-        { getGitBranch: () => null, onBranchChange: () => () => {} });
+        { getGitBranch: () => null, onBranchChange: () => () => {},
+          getExtensionStatuses: () => state.statuses });
     } },
   };
   for (const handler of loaded.extensions[0].handlers.get("session_start")) {
@@ -389,4 +391,79 @@ test("virtual footer remains width-bounded on narrow terminals", async (t) => {
     assert.equal(lines.length, 4);
     assert.ok(lines.every((line) => [...line].length <= width));
   }
+});
+
+// ── Model alias target ──────────────────────────────────────────────────────
+const aliasConfig = { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [] };
+function selectAlias(f, name = "implementer-medium") {
+  f.ctx.model = { id: name, name, provider: "alias", reasoning: true, contextWindow: 1000000 };
+}
+const ANSI_MUTED = "\x1b[38;5;8m";
+const ANSI_WARNING = "\x1b[33m";
+const ANSI_RESET = "\x1b[39m";
+const themedStatus = (target, cooldown) =>
+  `${ANSI_MUTED}${target}${ANSI_RESET}${cooldown ? ` \u00b7 ${ANSI_WARNING}${cooldown}${ANSI_RESET}` : ""}`;
+
+test("alias footer shows the resolved target model from the model-alias status", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash");
+});
+
+test("alias footer strips ANSI status colours and appends a dimmed cooldown", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m");
+});
+
+test("alias footer drops only the provider segment of a multi-slash target", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openrouter/meta-llama/llama-3.3-70b");
+  assert.equal(f.render()[1], "implementer-medium \u2192 meta-llama/llama-3.3-70b");
+});
+
+test("alias footer truncates the target and cooldown to the available width", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [24, 40, 80]) {
+    const lines = f.render(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => [...line].length <= width), `width ${width}`);
+  }
+  const narrow = f.render(40)[1];
+  assert.match(narrow, /implementer-medium \u2192 deepseek/);
+  assert.doesNotMatch(narrow, /gpt-6-luna/);
+  assert.match(narrow, /\.\.\.$/);
+});
+
+test("alias without a published status keeps the plain (alias) provider text", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+  f.state.statuses.set("model-alias", "");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+  f.state.statuses.set("model-alias", "cooldown: openai-codex/gpt-6-luna 5m");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
+test("non-alias models ignore the model-alias status", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  f.ctx.model = { ...f.ctx.model, id: "sonnet", name: "Sonnet", provider: "anthropic" };
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "Sonnet (anthropic)");
+});
+
+test("alias footer re-reads the status each frame so it never shows a stale target", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.match(f.render()[1], /deepseek-v4\.1-flash/);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-luna");
+  assert.equal(f.render()[1], "implementer-medium \u2192 gpt-6-luna");
+  f.state.statuses.delete("model-alias");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
 });

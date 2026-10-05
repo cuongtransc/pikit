@@ -95,6 +95,7 @@ export interface UsageStats {
 export interface SegmentContext {
   model: { id: string; name?: string; reasoning?: boolean; contextWindow?: number; provider?: string; baseUrl?: string } | undefined;
   routedModel?: { provider: string; id: string; thinkingLevel?: string };
+  aliasStatus?: { target: string; cooldown?: string } | null;
   isLocalModel: boolean;
   thinkingLevel: string;
   sessionId: string | undefined;

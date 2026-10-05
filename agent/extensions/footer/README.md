@@ -23,6 +23,7 @@ Row 2 right: T: <total> (<cache-read> cached, <hit-rate>% hit) ↑ <in> ↓ <out
 - **Token tracking**: Composite `T:` line with total, cache-read count, cache hit rate, input, and output counts
 - **Thinking level**: Lowercase selected level name with per-level colour
 - **Virtual routing**: The `model` segment adds `→ <physical model> (<provider>) • <routed thinking>` after a response on the current session branch. Ordinary models and virtual selections without a response keep the concise selected-model display.
+- **Model aliases**: When the `model-alias` status is available, aliases show `→ <resolved model>` and any active cooldown, which updates live.
 - **Nerd Font support**: Automatic detection with ASCII fallbacks
 - **Live updates**: Git status refreshes automatically as you work
 

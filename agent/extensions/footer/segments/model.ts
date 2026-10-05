@@ -1,4 +1,5 @@
 import type { RenderedSegment, SegmentContext } from "../types.js";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { applyColor } from "../theme.js";
 import { color } from "./helpers.js";
 
@@ -12,6 +13,14 @@ export const modelSegment = {
     }
 
     let content = color(ctx, "model", modelName);
+
+    if (ctx.model?.provider === "alias" && ctx.aliasStatus?.target) {
+      content += ` ${applyColor(ctx.theme, "dim", "→")} ${color(ctx, "model", ctx.aliasStatus.target)}`;
+      if (ctx.aliasStatus.cooldown) {
+        content += ` ${applyColor(ctx.theme, "dim", `· ${ctx.aliasStatus.cooldown}`)}`;
+      }
+      return { content: truncateToWidth(content, Math.max(0, ctx.width)), visible: true };
+    }
 
     if (ctx.model?.provider) {
       content += ` ${applyColor(ctx.theme, "dim", `(${ctx.model.provider})`)}`;
