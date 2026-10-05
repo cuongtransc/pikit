@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 // Exercise the real Pi loader/jiti without changing the project's dev dependencies.
 const piDir = process.env.PI_TEST_CODING_AGENT_DIR
@@ -27,7 +28,7 @@ function assistant(id, stopReason = "stop", input = 10) {
       stopReason, usage: usage(input) } };
 }
 
-async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true } = {}) {
+async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
   process.env.HOME = root;
@@ -42,6 +43,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const state = {
     entries, branch: [assistant("active")], sessionId: "session-a", leafId: "leaf-a",
     thinking: "high", scans: 0, reads: 0, branchReads: 0, contextReads: 0,
+    statuses: new Map(), themeCalls: [],
     context: { tokens: 800, contextWindow: 2000, percent: 40 },
   };
   const manager = {
@@ -60,7 +62,10 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const loaded = await loadExtensions([extensionPath], root);
   assert.deepEqual(loaded.errors, []);
   loaded.runtime.getThinkingLevel = () => state.thinking;
-  const theme = { fg: (_name, text) => text };
+  const theme = { fg: (name, text) => {
+    state.themeCalls.push([name, text]);
+    return ansiTheme ? `\x1b[38;5;8m${text}\x1b[0m` : text;
+  } };
   let component;
   const ctx = {
     cwd: root, hasUI: true, mode: "tui", sessionManager: manager,
@@ -69,7 +74,8 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     getContextUsage: () => { state.contextReads++; return state.context; },
     ui: { setFooter: (factory) => {
       component = factory({ requestRender() {} }, theme,
-        { getGitBranch: () => null, onBranchChange: () => () => {} });
+        { getGitBranch: () => null, onBranchChange: () => () => {},
+          ...(statusAPI ? { getExtensionStatuses: () => state.statuses } : {}) });
     } },
   };
   for (const handler of loaded.extensions[0].handlers.get("session_start")) {
@@ -82,7 +88,8 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     },
     render: (width = 240, trim = true) => component.render(width)
       .map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""))
-      .map((line) => trim ? line.trim() : line) };
+      .map((line) => trim ? line.trim() : line),
+    rawRender: (width = 240) => component.render(width) };
 }
 
 for (const layout of ["default", "example"]) {
@@ -389,4 +396,129 @@ test("virtual footer remains width-bounded on narrow terminals", async (t) => {
     assert.equal(lines.length, 4);
     assert.ok(lines.every((line) => [...line].length <= width));
   }
+});
+
+// ── Model alias target ──────────────────────────────────────────────────────
+const aliasConfig = { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [] };
+const aliasRightConfig = { ...statsConfig, row1LeftSegments: ["model"], row1RightSegments: ["text:RIGHT-ANCHOR"],
+  row2LeftSegments: [], row2RightSegments: [] };
+function selectAlias(f, name = "implementer-medium") {
+  f.ctx.model = { id: name, name, provider: "alias", reasoning: true, contextWindow: 1000000 };
+}
+const ANSI_MUTED = "\x1b[38;5;8m";
+const ANSI_WARNING = "\x1b[33m";
+const ANSI_RESET = "\x1b[39m";
+const themedStatus = (target, cooldown) =>
+  `${ANSI_MUTED}${target}${ANSI_RESET}${cooldown ? ` \u00b7 ${ANSI_WARNING}${cooldown}${ANSI_RESET}` : ""}`;
+
+test("alias footer shows the resolved target model from the model-alias status", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash");
+});
+
+test("alias footer strips ANSI status colours and appends a dimmed cooldown", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m");
+  assert.ok(f.state.themeCalls.some(([name, text]) => name === "dim" &&
+    text === "· cooldown: openai-codex/gpt-6-luna 5m"));
+});
+
+test("alias footer drops only the provider segment of a multi-slash target", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openrouter/meta-llama/llama-3.3-70b");
+  assert.equal(f.render()[1], "implementer-medium \u2192 meta-llama/llama-3.3-70b");
+});
+
+test("alias footer truncates the target and cooldown to the available width", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [24, 40, 80]) {
+    const lines = f.render(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => [...line].length <= width), `width ${width}`);
+  }
+  const narrow = f.render(40)[1];
+  assert.match(narrow, /implementer-medium \u2192 deepseek/);
+  assert.doesNotMatch(narrow, /gpt-6-luna/);
+  assert.match(narrow, /\.\.\.$/);
+});
+
+test("alias footer stays width-bounded when the theme emits ANSI styling", async (t) => {
+  const f = await fixture(t, { config: aliasConfig, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [24, 40, 80]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+  }
+  assert.ok(f.rawRender(80).some((line) => line.includes("\x1b[")), "styled output carries ANSI escapes");
+});
+
+test("alias footer keeps right-side segments and width bounds under a long target", async (t) => {
+  const f = await fixture(t, { config: aliasRightConfig, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
+  for (const width of [40, 60, 80, 120]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+    const row1 = lines[1].replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(row1, /RIGHT-ANCHOR/, `right side preserved at width ${width}`);
+  }
+  for (const width of [60, 80, 120]) {
+    const row1 = f.rawRender(width)[1].replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(row1, /\u2192 deepseek-v4\.1-flash/, `alias target retained at width ${width}`);
+  }
+});
+
+// Pins the producer contract this parser depends on:
+// `<provider/model> · cooldown: <ref> <n>m, <ref> <n>m` (see
+// pi-model-fallback-alias/src/status/status.ts formatFooterStatus).
+test("alias footer parses the producer's provider/model \u00b7 cooldown format", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m, other-provider/other-model 12m");
+  assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m, other-provider/other-model 12m");
+});
+
+test("alias without a published status keeps the plain (alias) provider text", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+  f.state.statuses.set("model-alias", "");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+  f.state.statuses.set("model-alias", "cooldown: openai-codex/gpt-6-luna 5m");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
+test("alias footer tolerates hosts without an extension status API", async (t) => {
+  const f = await fixture(t, { config: aliasConfig, statusAPI: false });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
+test("non-alias models ignore the model-alias status", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  f.ctx.model = { ...f.ctx.model, id: "sonnet", name: "Sonnet", provider: "anthropic" };
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "Sonnet (anthropic)");
+});
+
+test("alias footer re-reads the status on each render", async (t) => {
+  const f = await fixture(t, { config: aliasConfig });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.match(f.render()[1], /deepseek-v4\.1-flash/);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-luna");
+  assert.equal(f.render()[1], "implementer-medium \u2192 gpt-6-luna");
+  f.state.statuses.delete("model-alias");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
 });

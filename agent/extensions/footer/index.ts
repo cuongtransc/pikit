@@ -8,6 +8,7 @@ import { getGitStatus, invalidateGitStatus, invalidateGitBranch } from "./git-st
 import { getEffectiveConfig } from "./config.js";
 import { getIcons } from "./icons.js";
 import { getDefaultColors, fg } from "./theme.js";
+import { parseAliasStatus } from "./alias-status.js";
 
 const GIT_BRANCH_PATTERNS: RegExp[] = [
   /\bgit\s+(checkout|switch|branch\s+-[dDmM]|merge|rebase|pull|reset|worktree)/,
@@ -252,6 +253,8 @@ export default function footer(pi: ExtensionAPI) {
     // Get git status (cached)
     const gitBranch = footerDataRef?.getGitBranch() ?? null;
     const gitStatus = getGitStatus(gitBranch);
+    const extensionStatuses = footerDataRef?.getExtensionStatuses?.();
+    const aliasStatus = parseAliasStatus(extensionStatuses?.get("model-alias"));
 
     // Check if using OAuth subscription
     const usingSubscription = ctx.model
@@ -263,6 +266,7 @@ export default function footer(pi: ExtensionAPI) {
     return {
       model: ctx.model,
       routedModel,
+      aliasStatus,
       isLocalModel,
       thinkingLevel: pi.getThinkingLevel(),
       sessionId: ctx.sessionManager?.getSessionId?.(),
