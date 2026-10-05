@@ -1,6 +1,8 @@
 export interface AliasStatus {
   /** Model portion of the resolved provider/model target reference. */
   target: string;
+  /** Provider portion of the resolved target reference, when present. */
+  provider?: string;
   /** Optional cooldown segment published alongside the active target. */
   cooldown?: string;
 }
@@ -30,8 +32,9 @@ export function parseAliasStatus(raw: string | undefined | null): AliasStatus | 
   const providerSeparator = targetRef.indexOf("/");
   if (providerSeparator < 0) return null;
 
+  const provider = targetRef.slice(0, providerSeparator).trim();
   const target = targetRef.slice(providerSeparator + 1).trim();
   if (!target) return null;
 
-  return cooldown ? { target, cooldown } : { target };
+  return { target, ...(provider ? { provider } : {}), ...(cooldown ? { cooldown } : {}) };
 }

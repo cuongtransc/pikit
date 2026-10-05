@@ -28,7 +28,7 @@ function assistant(id, stopReason = "stop", input = 10) {
       stopReason, usage: usage(input) } };
 }
 
-async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false } = {}) {
+async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false, aliasMap = undefined } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
   process.env.HOME = root;
@@ -40,6 +40,10 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const configPath = join(root, ".pi", "agent", "configs", "footer.json");
   await mkdir(dirname(configPath), { recursive: true });
   if (config !== null) await writeFile(configPath, JSON.stringify(config));
+  const aliasPath = join(root, ".pi", "agent", "model-alias.json");
+  if (aliasMap !== undefined) {
+    await writeFile(aliasPath, typeof aliasMap === "string" ? aliasMap : JSON.stringify(aliasMap));
+  }
   const state = {
     entries, branch: [assistant("active")], sessionId: "session-a", leafId: "leaf-a",
     thinking: "high", scans: 0, reads: 0, branchReads: 0, contextReads: 0,
@@ -82,7 +86,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     await handler({ type: "session_start", reason: "startup" }, ctx);
   }
   t.after(() => component?.dispose());
-  return { state, ctx, root, configPath,
+  return { state, ctx, root, configPath, aliasPath,
     emit: async (type, event, eventCtx = ctx) => {
       for (const handler of loaded.extensions[0].handlers.get(type) ?? []) await handler(event, eventCtx);
     },
@@ -102,7 +106,9 @@ for (const layout of ["default", "example"]) {
       assert.equal(lines.length, 4);
       assert.match(lines[1], /Virtual \(fixture\)/);
       assert.doesNotMatch(lines[1], /40\.0%|2\.0k/);
-      assert.match(lines[3], /^ ▋{18} 40\.0% \/ 2\.0k +T:/);
+      // The shipped example enables contextBar.compactLabel; the default layout keeps the window label.
+      const contextLabel = layout === "example" ? "40%" : "40\\.0% \\/ 2\\.0k";
+      assert.match(lines[3], new RegExp(`^ ▋{18} ${contextLabel} +T:`));
       assert.match(lines[3], /\$0\.10 $/);
       assert.equal(lines[3].length, width, "bottom row keeps both sides aligned");
     }
@@ -521,4 +527,163 @@ test("alias footer re-reads the status on each render", async (t) => {
   assert.equal(f.render()[1], "implementer-medium \u2192 gpt-6-luna");
   f.state.statuses.delete("model-alias");
   assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
+// ── Short alias labels, fallback marker and compact options ──────────────────
+const shortLabelConfig = {
+  ...statsConfig,
+  row1LeftSegments: ["model"],
+  row2LeftSegments: [],
+  segmentOptions: {
+    model: {
+      aliasLabels: {
+        "implementer-medium": "impl", "implementer-high": "impl+", "reviewer-medium": "rev",
+        "reviewer-high": "rev+", "mid-model": "mid", "high-model": "high",
+        scout: "scout", planner: "plan", main: "main",
+      },
+    },
+  },
+};
+const fallbackChain = {
+  "implementer-medium": [
+    "opencode-go/deepseek-v4.1-flash",
+    "openai-codex/gpt-6-sol",
+    "openai-codex/gpt-6-luna",
+  ],
+};
+
+test("short alias labels render a compact label with no arrow spaces", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+});
+
+test("an alias missing from aliasLabels keeps its full name", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [],
+    segmentOptions: { model: { aliasLabels: { scout: "scout" } } } }, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium\u2192deepseek-v4.1-flash");
+});
+
+test("a served target that is not the chain head renders \u2193 in the warning colour", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+  assert.ok(f.state.themeCalls.some(([name, text]) => name === "warning" && text === "gpt-6-sol"),
+    "fallback target uses the warning colour");
+  f.state.themeCalls.length = 0;
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+  assert.ok(!f.state.themeCalls.some(([name]) => name === "warning"), "the chain head is not a fallback");
+});
+
+test("a target absent from a readable chain keeps the plain arrow", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["opencode-go/other-model"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("a missing or unreadable alias map falls back to the plain arrow", async (t) => {
+  const noMap = await fixture(t, { config: shortLabelConfig });
+  selectAlias(noMap);
+  noMap.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(noMap.render()[1], "impl\u2192gpt-6-sol");
+  assert.ok(!noMap.state.themeCalls.some(([name]) => name === "warning"));
+
+  const broken = await fixture(t, { config: shortLabelConfig, aliasMap: "{ broken json" });
+  selectAlias(broken);
+  broken.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(broken.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("the fallback marker follows map changes after the first read", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["opencode-go/deepseek-v4.1-flash"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+  await writeFile(f.aliasPath, JSON.stringify(fallbackChain));
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("compact alias rendering stays width-bounded on narrow terminals", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-luna");
+  for (const width of [8, 12, 24, 40]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+  }
+});
+
+const compactThinkingConfig = {
+  ...statsConfig,
+  row1LeftSegments: ["text:\u26a1", "thinking"],
+  row2LeftSegments: [],
+  segmentOptions: { model: { compactThinking: true } },
+};
+
+test("compactThinking joins the \u26a1 marker to the thinking level", async (t) => {
+  const f = await fixture(t, { config: compactThinkingConfig });
+  f.state.thinking = "low";
+  assert.equal(f.render()[1], "\u26a1low");
+});
+
+test("thinking keeps its space when compactThinking is off", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig,
+    row1LeftSegments: ["text:\u26a1", "thinking"], row2LeftSegments: [] } });
+  f.state.thinking = "low";
+  assert.equal(f.render()[1], "\u26a1 low");
+});
+
+const compactContextConfig = {
+  ...statsConfig,
+  row1LeftSegments: [],
+  row2LeftSegments: ["context_pct"],
+  row2RightSegments: [],
+  segmentOptions: { contextBar: { barWidth: 6, compactLabel: true } },
+};
+
+test("compactLabel renders a rounded percent without the context window", async (t) => {
+  const f = await fixture(t, { config: compactContextConfig });
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 24%");
+  f.state.leafId = "leaf-compact";
+  f.state.context = { tokens: 125, contextWindow: 1000, percent: 12.5 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 13%");
+});
+
+test("context label keeps its decimal percent and window by default", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: [], row2LeftSegments: ["context_pct"],
+    row2RightSegments: [], segmentOptions: { contextBar: { barWidth: 6 } } } });
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 24.3% / 1.0M");
+});
+
+// The approved single-row look, exercised end to end through the real extension.
+test("approved compact layout renders short label, fallback marker, glued thinking and compact context", async (t) => {
+  const f = await fixture(t, {
+    config: {
+      row1LeftSegments: ["pi", "model", "text:\u26a1", "thinking", "separator", "context_pct", "separator", "cost"],
+      row1RightSegments: [], row2LeftSegments: [], row2RightSegments: [],
+      segmentOptions: {
+        model: { aliasLabels: { "implementer-medium": "impl" }, compactThinking: true },
+        contextBar: { barWidth: 6, compactLabel: true },
+      },
+    },
+    aliasMap: fallbackChain,
+  });
+  selectAlias(f);
+  f.state.thinking = "low";
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.match(f.render()[1], /impl\u2192deepseek-v4\.1-flash \u26a1low \| \u258b{6} 24% \| \$0\.10$/);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.match(f.render()[1], /impl\u2193gpt-6-sol \u26a1low \| \u258b{6} 24% \| \$0\.10$/);
 });

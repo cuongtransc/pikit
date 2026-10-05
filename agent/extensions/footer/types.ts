@@ -71,6 +71,14 @@ export interface StatusLineSegmentOptions {
     gradientMid?: ColorValue;
     gradientEnd?: ColorValue;
     gradientMidPoint?: number;
+    /** Render a rounded `24%` instead of `24.3% / 1.0M`. */
+    compactLabel?: boolean;
+  };
+  model?: {
+    /** Short label per alias name, e.g. `{ "implementer-medium": "impl" }`. */
+    aliasLabels?: Record<string, string>;
+    /** Join the `text:⚡` marker to the thinking level (`⚡low`, not `⚡ low`). */
+    compactThinking?: boolean;
   };
 }
 
@@ -95,7 +103,7 @@ export interface UsageStats {
 export interface SegmentContext {
   model: { id: string; name?: string; reasoning?: boolean; contextWindow?: number; provider?: string; baseUrl?: string } | undefined;
   routedModel?: { provider: string; id: string; thinkingLevel?: string };
-  aliasStatus?: { target: string; cooldown?: string } | null;
+  aliasStatus?: { target: string; provider?: string; cooldown?: string } | null;
   isLocalModel: boolean;
   thinkingLevel: string;
   sessionId: string | undefined;
