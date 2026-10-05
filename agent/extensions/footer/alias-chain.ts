@@ -16,9 +16,9 @@ interface AliasChainCache {
 
 let cache: AliasChainCache | null = null;
 
-/** Path of the fallback-alias map, resolved the same way pi resolves its agent dir. */
+/** Path of the fallback-alias map, mirroring the producer's `MAP_PATH`. */
 export function getAliasMapPath(): string {
-  return join(getAgentDir(), "model-alias.json");
+  return process.env.PI_MODEL_ALIAS_MAP || join(getAgentDir(), "model-alias.json");
 }
 
 /**
@@ -48,16 +48,59 @@ function normalizeTargets(value: unknown): string[] | null {
   return targets as string[];
 }
 
+const ROLE_KEYS = new Set(["targets", "timeouts", "cooldown"]);
+const TIMEOUT_KEYS = ["firstEventMs", "stallMs", "commitMs"];
+const COOLDOWN_KEYS = new Set(["baseMs", "capMs", "resetSuccesses"]);
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+/** Mirror `parseTimeouts`: allowed keys only, each value finite and positive. */
+function isValidTimeouts(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !TIMEOUT_KEYS.includes(key))) return false;
+  return TIMEOUT_KEYS.every((key) => value[key] === undefined || isPositiveFiniteNumber(value[key]));
+}
+
+/**
+ * Mirror `parseCooldown`. Also rejects an explicitly set `baseMs > capMs`, which
+ * `resolvePolicy` refuses when the role supplies the base; an inherited base that
+ * exceeds the cap is clamped by the producer rather than rejected.
+ */
+function isValidCooldown(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !COOLDOWN_KEYS.has(key))) return false;
+  for (const key of ["baseMs", "capMs"]) {
+    const delay = value[key];
+    if (delay !== undefined && !isPositiveFiniteNumber(delay)) return false;
+  }
+  const reset = value.resetSuccesses;
+  if (reset !== undefined && (!Number.isSafeInteger(reset) || (reset as number) < 1)) return false;
+  if (
+    typeof value.baseMs === "number" &&
+    typeof value.capMs === "number" &&
+    value.baseMs > value.capMs
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Mirror `parseRoleConfig`: a bare string/array of refs, or an object whose only
- * allowed keys are `targets`/`timeouts`/`cooldown` and which carries `targets`.
- * Returns null for a role the producer would reject.
+ * allowed keys are `targets`/`timeouts`/`cooldown`, which carries `targets` and
+ * whose policy fields the producer would accept. Returns null for a role the
+ * producer would reject, so the caller can skip just that role.
  */
 function parseRoleTargets(value: unknown): string[] | null {
   if (typeof value === "string" || Array.isArray(value)) return normalizeTargets(value);
   if (!isRecord(value)) return null;
-  const validKeys = new Set(["targets", "timeouts", "cooldown"]);
-  if (Object.keys(value).some((key) => !validKeys.has(key)) || !("targets" in value)) return null;
+  if (Object.keys(value).some((key) => !ROLE_KEYS.has(key)) || !("targets" in value)) return null;
+  if (!isValidTimeouts(value.timeouts)) return null;
+  if (!isValidCooldown(value.cooldown)) return null;
   return normalizeTargets(value.targets);
 }
 
@@ -145,6 +188,8 @@ export function loadAliasChains(path: string = getAliasMapPath()): AliasChainMap
       raw = new Map();
       for (const [role, value] of Object.entries(parsed)) {
         if (role.startsWith("$")) continue;
+        // The producer requires a non-empty role name; skip one it would reject.
+        if (!role) continue;
         const targets = parseRoleTargets(value);
         // Skip only the odd role; the rest of the map still drives the marker.
         if (!targets) continue;

@@ -89,19 +89,20 @@ enables the fallback marker:
 - `aliasLabels` maps an alias name to a short label, e.g.
   `{ "implementer-medium": "impl", "reviewer-high": "rev+" }`. An alias missing from the map
   keeps its full name.
-- **Fallback marker**: the footer reads the `pi-model-fallback-alias` map at
-  `~/.pi/agent/model-alias.json` (`PI_CODING_AGENT_DIR` is honoured, the same way pi resolves its
-  agent dir) and mirrors the producer's parser: an alias is a non-empty array of
+- **Fallback marker**: the footer reads the `pi-model-fallback-alias` map (`PI_MODEL_ALIAS_MAP` if
+  set, otherwise `~/.pi/agent/model-alias.json`; `PI_CODING_AGENT_DIR` is honoured, the same way pi
+  resolves its agent dir) and mirrors the producer's parser: an alias is a non-empty array of
   `<provider>/<model>` refs, a single ref string, or an object
-  `{ "targets": [...], "timeouts": …, "cooldown": … }`. Nested `alias/<name>` refs are expanded
-  recursively before comparison, dropping unknown or cyclic nested aliases, exactly as the producer
-  does. When the served `model-alias` target is not the first ref in that expanded chain, the footer
-  renders `label↓model` with the model in the `warning` colour; a target that is the expanded chain
-  head, or is absent from a readable chain, keeps the plain `label→model`. The ref rule is the
-  producer's own `isModelRef`: a string whose first `/` is neither first nor last. A role the
-  producer would reject is skipped and only that alias loses its marker, never the whole map. The
-  parsed map is cached and re-read when the file's mtime, ctime, size or mode changes; a failed read
-  is never cached, so a transient failure or a fixed permission recovers on the next render.
+  `{ "targets": [...], "timeouts": …, "cooldown": … }` whose policy fields the producer would
+  accept. Nested `alias/<name>` refs are expanded recursively before comparison, dropping unknown
+  or cyclic nested aliases, exactly as the producer does. When the served `model-alias` target is
+  not the first ref in that expanded chain, the footer renders `label↓model` with the model in the
+  `warning` colour; a target that is the expanded chain head, or is absent from a readable chain,
+  keeps the plain `label→model`. The ref rule is the producer's own `isModelRef`: a string whose
+  first `/` is neither first nor last, whitespace included. A role the producer would reject is
+  skipped and only that alias loses its marker, never the whole map. The parsed map is cached and
+  re-read when the file's mtime, ctime, size or mode changes; a failed read is never cached, so a
+  transient failure or a fixed permission recovers on the next render.
 
 ```json
 {

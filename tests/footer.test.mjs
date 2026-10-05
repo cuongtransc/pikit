@@ -31,10 +31,14 @@ function assistant(id, stopReason = "stop", input = 10) {
 async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false, aliasMap = undefined } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
+  const oldAliasMap = process.env.PI_MODEL_ALIAS_MAP;
   process.env.HOME = root;
+  delete process.env.PI_MODEL_ALIAS_MAP;
   t.after(async () => {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldAliasMap === undefined) delete process.env.PI_MODEL_ALIAS_MAP;
+    else process.env.PI_MODEL_ALIAS_MAP = oldAliasMap;
     await rm(root, { recursive: true, force: true });
   });
   const configPath = join(root, ".pi", "agent", "configs", "footer.json");
@@ -627,11 +631,14 @@ test("an object-form alias entry with targets is accepted", async (t) => {
 
 test("a single-string alias entry is accepted", async (t) => {
   const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
-    "implementer-medium": "opencode-go/deepseek-v4.1-flash",
+    base: "p/fb",
+    "implementer-medium": ["alias/base", "p/head"],
   } });
   selectAlias(f);
-  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
-  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+  f.state.statuses.set("model-alias", "p/head");
+  // If the string form were rejected, alias/base would be unknown, so the head
+  // would be p/head and the arrow would be plain.
+  assert.equal(f.render()[1], "impl\u2193head");
 });
 
 test("one rejected alias entry does not disable the others", async (t) => {
@@ -640,6 +647,48 @@ test("one rejected alias entry does not disable the others", async (t) => {
     scout: { bad: "shape" },
     "reviewer-medium": 42,
   } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("an invalid policy field makes the producer reject the role", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": { targets: ["p/head", "p/fb"], timeouts: { firstEventMs: 0 } },
+    "reviewer-medium": ["p/head", "p/fb"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2192fb", "the invalid role is skipped");
+  selectAlias(f, "reviewer-medium");
+  assert.equal(f.render()[1], "rev\u2193fb", "a valid sibling role still marks");
+});
+
+test("a cooldown with baseMs over capMs makes the role invalid", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": { targets: ["p/head", "p/fb"], cooldown: { baseMs: 600000, capMs: 300000 } },
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2192fb");
+});
+
+test("a model id containing whitespace is compared verbatim", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["p/ fb", "p/fb"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/ fb");
+  assert.equal(f.render()[1], "impl\u2192 fb", "the head ref is not trimmed onto the second entry");
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2193fb");
+});
+
+test("the PI_MODEL_ALIAS_MAP override is honoured", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig });
+  const customPath = join(f.root, "custom-roles.json");
+  await writeFile(customPath, JSON.stringify(fallbackChain));
+  process.env.PI_MODEL_ALIAS_MAP = customPath;
   selectAlias(f);
   f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
   assert.equal(f.render()[1], "impl\u2193gpt-6-sol");

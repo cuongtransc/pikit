@@ -32,8 +32,11 @@ export function parseAliasStatus(raw: string | undefined | null): AliasStatus | 
   const providerSeparator = targetRef.indexOf("/");
   if (providerSeparator < 0) return null;
 
-  const provider = targetRef.slice(0, providerSeparator).trim();
-  const target = targetRef.slice(providerSeparator + 1).trim();
+  // Split at the first slash without trimming the parts: a model id may contain
+  // whitespace the producer accepts verbatim, and the footer must rebuild the
+  // exact ref to compare it against the chain.
+  const provider = targetRef.slice(0, providerSeparator);
+  const target = targetRef.slice(providerSeparator + 1);
   if (!target) return null;
 
   return { target, ...(provider ? { provider } : {}), ...(cooldown ? { cooldown } : {}) };
