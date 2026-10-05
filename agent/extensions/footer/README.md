@@ -23,7 +23,8 @@ Row 2 right: T: <total> (<cache-read> cached, <hit-rate>% hit) ↑ <in> ↓ <out
 - **Token tracking**: Composite `T:` line with total, cache-read count, cache hit rate, input, and output counts
 - **Thinking level**: Lowercase selected level name with per-level colour
 - **Virtual routing**: The `model` segment adds `→ <physical model> (<provider>) • <routed thinking>` after a response on the current session branch. Ordinary models and virtual selections without a response keep the concise selected-model display.
-- **Model aliases**: When the `model-alias` status is available, aliases show `→ <resolved model>` and any active cooldown, which updates live. The target is the model that served the last turn (or the selected target before the first turn), not a prediction of the next turn after a cooldown expires.
+- **Model aliases**: When the `model-alias` status is available, aliases show `→ <resolved model>` and any active cooldown, which updates live. The target is the model that served the last turn (or the selected target before the first turn), not a prediction of the next turn after a cooldown expires. Set `segmentOptions.model.aliasLabels` to shorten the alias and mark fallbacks (see [Compact alias options](#compact-alias-options)).
+- **Compact display**: `segmentOptions.model.compactThinking` joins the `⚡` marker to the level (`⚡low`), and `segmentOptions.contextBar.compactLabel` turns `24.3% / 1.0M` into `24%`.
 - **Nerd Font support**: Automatic detection with ASCII fallbacks
 - **Live updates**: Git status refreshes automatically as you work
 
@@ -64,10 +65,10 @@ See `footer.example.json` in this directory for a full annotated example.
 | Segment | Description | Notes |
 |---------|-------------|-------|
 | `pi` | π symbol in accent blue | — |
-| `model` | Selected model name + `(provider)`, with physical route for virtual models | Route uses the latest current-branch assistant's recorded provider/model/thinking; missing routed thinking is omitted, never inferred from the selected level. Alias models instead show `→ <resolved model>` plus any active cooldown from the `model-alias` status (the last-served target, or the selected target before the first turn), falling back to `(alias)` when no target status exists |
+| `model` | Selected model name + `(provider)`, with physical route for virtual models | Route uses the latest current-branch assistant's recorded provider/model/thinking; missing routed thinking is omitted, never inferred from the selected level. Alias models instead show `→ <resolved model>` plus any active cooldown from the `model-alias` status (the last-served target, or the selected target before the first turn), falling back to `(alias)` when no target status exists. `segmentOptions.model.aliasLabels` switches to short labels and a fallback marker |
 | `path` | Current working directory | `segmentOptions.path.mode`: `"basename"` (default) · `"abbreviated"` · `"full"` |
 | `git` | Git branch and dirty indicators | `showBranch`, `showStaged`, `showUnstaged`, `showUntracked` (all bool) |
-| `context_pct` | Gradient bar + `X.X%` + max tokens | Bar fully configurable via `segmentOptions.contextBar` (see below). % and max tokens use `contextLabel` colour. Max tokens formatted with K/M suffix (e.g. `128k`, `2M`). Set `DEBUG_PCT` in `context.ts` to a number (0–100) to pin the bar at a fixed value for visual testing. |
+| `context_pct` | Gradient bar + `X.X%` + max tokens | Bar fully configurable via `segmentOptions.contextBar` (see below). % and max tokens use `contextLabel` colour. Max tokens formatted with K/M suffix (e.g. `128k`, `2M`). `segmentOptions.contextBar.compactLabel` drops the max tokens and rounds the percent (`24%`). Set `DEBUG_PCT` in `context.ts` to a number (0–100) to pin the bar at a fixed value for visual testing. |
 | `cost` | `$<amount>` | `$` dim, amount in `cost` colour (`muted` by default) |
 | `thinking` | `<level>` | Lowercase level with per-level colour; always visible |
 | `token_total` | `T: <total> (<cache-read> cached, <hit-rate>% hit) ↑ <in> ↓ <out>` | Hit rate is `cacheRead / (input + cacheRead + cacheWrite)`; labels are dim and numbers use the `tokens` colour |
@@ -77,7 +78,60 @@ See `footer.example.json` in this directory for a full annotated example.
 | `cache_write` | Cache write tokens (hidden if zero) | — |
 | `context_total` | Total context window size | — |
 | `separator` | `\|` divider | Coloured via `separator` in `colors` |
-| `text:...` | Literal text, e.g. `text:⚡` | — |
+| `text:...` | Literal text, e.g. `text:⚡` | With `segmentOptions.model.compactThinking`, a `text:⚡` segment immediately before `thinking` drops its separator space |
+
+## Compact alias options
+
+Alias rendering is opt-in. Setting `segmentOptions.model.aliasLabels` (even to `{}`) switches
+the `model` segment for alias providers from `label → model` to a compact `label→model`, and
+enables the fallback marker:
+
+- `aliasLabels` maps an alias name to a short label, e.g.
+  `{ "implementer-medium": "impl", "reviewer-high": "rev+" }`. An alias missing from the map
+  keeps its full name.
+- **Fallback marker**: the footer reads the `pi-model-fallback-alias` map (`PI_MODEL_ALIAS_MAP` if
+  set, otherwise `~/.pi/agent/model-alias.json`; `PI_CODING_AGENT_DIR` is honoured, the same way pi
+  resolves its agent dir) and mirrors the producer's parser: an alias is a non-empty array of
+  `<provider>/<model>` refs, a single ref string, or an object
+  `{ "targets": [...], "timeouts": …, "cooldown": … }` whose policy fields the producer would
+  accept. Nested `alias/<name>` refs are expanded recursively before comparison, dropping unknown
+  or cyclic nested aliases, exactly as the producer does. When the served `model-alias` target is
+  not the first ref in that expanded chain, the footer renders `label↓model` with the model in the
+  `warning` colour; a target that is the expanded chain head, or is absent from a readable chain,
+  keeps the plain `label→model`. The ref rule is the producer's own `isModelRef`: a string whose
+  first `/` is neither first nor last, whitespace included. A role the producer would reject is
+  skipped and only that alias loses its marker, never the whole map. The parsed map is cached and
+  re-read when the file's mtime, ctime, size or mode changes; a failed read is never cached, so a
+  transient failure or a fixed permission recovers on the next render.
+
+```json
+{
+  "segmentOptions": {
+    "model": {
+      "aliasLabels": {
+        "implementer-medium": "impl",
+        "implementer-high": "impl+",
+        "reviewer-medium": "rev",
+        "reviewer-high": "rev+",
+        "mid-model": "mid",
+        "high-model": "high",
+        "scout": "scout",
+        "planner": "plan",
+        "main": "main"
+      },
+      "compactThinking": true
+    }
+  }
+}
+```
+
+`segmentOptions.model.compactThinking` joins the `text:⚡` marker to the thinking level, so
+`⚡ low` becomes `⚡low`.
+
+`segmentOptions.contextBar.compactLabel` renders a rounded percent with no window label:
+`▋▋▋▋▋▋ 24%` instead of `▋▋▋▋▋▋ 24.3% / 1.0M`.
+
+All three options are off by default, so an existing `footer.json` keeps its current output.
 
 ## Branch and route accounting
 
@@ -109,6 +163,7 @@ The `context_pct` segment's bar is fully configurable via `segmentOptions.contex
 | `gradientMid` | color | `"#d67858"` | Gradient midpoint color — hex or pi theme token |
 | `gradientEnd` | color | `"#ae4f2f"` | Gradient color at the right/full end — hex or pi theme token |
 | `gradientMidPoint` | number | `0.55` | Where `gradientMid` sits along the bar (0–1). Below this fraction the gradient runs start→mid; above it mid→end |
+| `compactLabel` | boolean | `false` | Drop `/ <window>` and round the percent to an integer (`24%`) |
 
 All color fields accept either a hex string (e.g. `"#ff6347"`) or a pi theme token (e.g. `"accent"`, `"warning"`, `"dim"`).
 

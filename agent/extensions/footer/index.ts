@@ -31,6 +31,11 @@ function renderSegmentWithWidth(
   return { content: rendered.content, width: visibleWidth(rendered.content), visible: true };
 }
 
+/** A `text:⚡` marker segment that compactThinking folds into the thinking level. */
+function isThinkingMarker(segId: StatusLineSegmentId | undefined): boolean {
+  return segId === "text:⚡";
+}
+
 /**
  * Build footer content from left and right segments.
  * Left segments are left-aligned, right segments are right-aligned.
@@ -43,24 +48,37 @@ function buildFooterContent(
 ): string {
   const maxContentWidth = Math.max(0, availableWidth - 2);
 
-  // Render left segments
+  // Render left segments. With compactThinking the ⚡ marker joins the level
+  // (`⚡low`), so the marker's part absorbs the thinking segment's content.
+  const compactThinking = ctx.options.model?.compactThinking === true;
   const leftParts: string[] = [];
+  let previousSegId: StatusLineSegmentId | undefined;
   for (const segId of leftSegments) {
     const { content, visible } = renderSegmentWithWidth(segId, ctx);
-    if (visible) {
+    if (!visible) continue;
+    if (compactThinking && segId === "thinking" && leftParts.length > 0 && isThinkingMarker(previousSegId)) {
+      leftParts[leftParts.length - 1] += content;
+    } else {
       leftParts.push(content);
     }
+    previousSegId = segId;
   }
 
   // Render right segments
   const rightParts: string[] = [];
   let rightWidth = 0;
+  let previousRightSegId: StatusLineSegmentId | undefined;
   for (const segId of rightSegments) {
     const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
-    if (visible) {
+    if (!visible) continue;
+    if (compactThinking && segId === "thinking" && rightParts.length > 0 && isThinkingMarker(previousRightSegId)) {
+      rightParts[rightParts.length - 1] += content;
+      rightWidth += width; // glued: no space between marker and level
+    } else {
       rightParts.push(content);
       rightWidth += width + 1; // +1 for space between
     }
+    previousRightSegId = segId;
   }
   if (rightParts.length > 0) {
     rightWidth -= 1; // Remove trailing space

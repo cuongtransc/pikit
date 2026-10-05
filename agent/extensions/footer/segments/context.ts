@@ -70,12 +70,13 @@ export const contextPctSegment = {
     }
     bar += "\x1b[0m";
 
-    const pctLabel = pct === null ? "?" : `${pct.toFixed(1)}%`;
+    const pctLabel = pct === null ? "?" : (barOpts.compactLabel ? `${Math.round(pct)}%` : `${pct.toFixed(1)}%`);
     const pctStr = color(ctx, "contextLabel", pctLabel);
-    const tokensLabel = `/ ${formatTokens(ctx.contextWindow)}`;
-    const tokensStr = color(ctx, "contextLabel", tokensLabel);
+    const windowSuffix = barOpts.compactLabel
+      ? ""
+      : ` ${color(ctx, "contextLabel", `/ ${formatTokens(ctx.contextWindow)}`)}`;
 
-    return { content: `${bar} ${pctStr} ${tokensStr}`, visible: true };
+    return { content: `${bar} ${pctStr}${windowSuffix}`, visible: true };
   },
 };
 

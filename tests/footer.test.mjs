@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -28,18 +28,26 @@ function assistant(id, stopReason = "stop", input = 10) {
       stopReason, usage: usage(input) } };
 }
 
-async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false } = {}) {
+async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true, ansiTheme = false, aliasMap = undefined } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
+  const oldAliasMap = process.env.PI_MODEL_ALIAS_MAP;
   process.env.HOME = root;
+  delete process.env.PI_MODEL_ALIAS_MAP;
   t.after(async () => {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldAliasMap === undefined) delete process.env.PI_MODEL_ALIAS_MAP;
+    else process.env.PI_MODEL_ALIAS_MAP = oldAliasMap;
     await rm(root, { recursive: true, force: true });
   });
   const configPath = join(root, ".pi", "agent", "configs", "footer.json");
   await mkdir(dirname(configPath), { recursive: true });
   if (config !== null) await writeFile(configPath, JSON.stringify(config));
+  const aliasPath = join(root, ".pi", "agent", "model-alias.json");
+  if (aliasMap !== undefined) {
+    await writeFile(aliasPath, typeof aliasMap === "string" ? aliasMap : JSON.stringify(aliasMap));
+  }
   const state = {
     entries, branch: [assistant("active")], sessionId: "session-a", leafId: "leaf-a",
     thinking: "high", scans: 0, reads: 0, branchReads: 0, contextReads: 0,
@@ -82,7 +90,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     await handler({ type: "session_start", reason: "startup" }, ctx);
   }
   t.after(() => component?.dispose());
-  return { state, ctx, root, configPath,
+  return { state, ctx, root, configPath, aliasPath,
     emit: async (type, event, eventCtx = ctx) => {
       for (const handler of loaded.extensions[0].handlers.get(type) ?? []) await handler(event, eventCtx);
     },
@@ -102,7 +110,9 @@ for (const layout of ["default", "example"]) {
       assert.equal(lines.length, 4);
       assert.match(lines[1], /Virtual \(fixture\)/);
       assert.doesNotMatch(lines[1], /40\.0%|2\.0k/);
-      assert.match(lines[3], /^ ▋{18} 40\.0% \/ 2\.0k +T:/);
+      // The shipped example enables contextBar.compactLabel; the default layout keeps the window label.
+      const contextLabel = layout === "example" ? "40%" : "40\\.0% \\/ 2\\.0k";
+      assert.match(lines[3], new RegExp(`^ ▋{18} ${contextLabel} +T:`));
       assert.match(lines[3], /\$0\.10 $/);
       assert.equal(lines[3].length, width, "bottom row keeps both sides aligned");
     }
@@ -521,4 +531,335 @@ test("alias footer re-reads the status on each render", async (t) => {
   assert.equal(f.render()[1], "implementer-medium \u2192 gpt-6-luna");
   f.state.statuses.delete("model-alias");
   assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
+// ── Short alias labels, fallback marker and compact options ──────────────────
+const shortLabelConfig = {
+  ...statsConfig,
+  row1LeftSegments: ["model"],
+  row2LeftSegments: [],
+  segmentOptions: {
+    model: {
+      aliasLabels: {
+        "implementer-medium": "impl", "implementer-high": "impl+", "reviewer-medium": "rev",
+        "reviewer-high": "rev+", "mid-model": "mid", "high-model": "high",
+        scout: "scout", planner: "plan", main: "main",
+      },
+    },
+  },
+};
+const fallbackChain = {
+  "implementer-medium": [
+    "opencode-go/deepseek-v4.1-flash",
+    "openai-codex/gpt-6-sol",
+    "openai-codex/gpt-6-luna",
+  ],
+};
+
+test("short alias labels render a compact label with no arrow spaces", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+});
+
+test("an alias missing from aliasLabels keeps its full name", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [],
+    segmentOptions: { model: { aliasLabels: { scout: "scout" } } } }, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium\u2192deepseek-v4.1-flash");
+});
+
+test("a served target that is not the chain head renders \u2193 in the warning colour", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+  assert.ok(f.state.themeCalls.some(([name, text]) => name === "warning" && text === "gpt-6-sol"),
+    "fallback target uses the warning colour");
+  f.state.themeCalls.length = 0;
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+  assert.ok(!f.state.themeCalls.some(([name]) => name === "warning"), "the chain head is not a fallback");
+});
+
+test("a target absent from a readable chain keeps the plain arrow", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["opencode-go/other-model"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("a missing or unreadable alias map falls back to the plain arrow", async (t) => {
+  const noMap = await fixture(t, { config: shortLabelConfig });
+  selectAlias(noMap);
+  noMap.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(noMap.render()[1], "impl\u2192gpt-6-sol");
+  assert.ok(!noMap.state.themeCalls.some(([name]) => name === "warning"));
+
+  const broken = await fixture(t, { config: shortLabelConfig, aliasMap: "{ broken json" });
+  selectAlias(broken);
+  broken.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(broken.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("the fallback marker follows map changes after the first read", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["opencode-go/deepseek-v4.1-flash"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+  await writeFile(f.aliasPath, JSON.stringify(fallbackChain));
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+// ── Producer map forms, nested expansion and cache recovery ──────────────────
+test("an object-form alias entry with targets is accepted", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": {
+      targets: ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-sol"],
+      timeouts: { firstEventMs: 1000 },
+      cooldown: { baseMs: 60000 },
+    },
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a single-string alias entry is accepted", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    base: "p/fb",
+    "implementer-medium": ["alias/base", "p/head"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/head");
+  // If the string form were rejected, alias/base would be unknown, so the head
+  // would be p/head and the arrow would be plain.
+  assert.equal(f.render()[1], "impl\u2193head");
+});
+
+test("one rejected alias entry does not disable the others", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-sol"],
+    scout: { bad: "shape" },
+    "reviewer-medium": 42,
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("an invalid policy field makes the producer reject the role", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": { targets: ["p/head", "p/fb"], timeouts: { firstEventMs: 0 } },
+    "reviewer-medium": ["p/head", "p/fb"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2192fb", "the invalid role is skipped");
+  selectAlias(f, "reviewer-medium");
+  assert.equal(f.render()[1], "rev\u2193fb", "a valid sibling role still marks");
+});
+
+test("a cooldown with baseMs over capMs makes the role invalid", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": { targets: ["p/head", "p/fb"], cooldown: { baseMs: 600000, capMs: 300000 } },
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2192fb");
+});
+
+test("a model id containing whitespace is compared verbatim", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["p/ fb", "p/fb"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "p/ fb");
+  assert.equal(f.render()[1], "impl\u2192 fb", "the head ref is not trimmed onto the second entry");
+  f.state.statuses.set("model-alias", "p/fb");
+  assert.equal(f.render()[1], "impl\u2193fb");
+});
+
+test("the PI_MODEL_ALIAS_MAP override is honoured", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig });
+  const customPath = join(f.root, "custom-roles.json");
+  await writeFile(customPath, JSON.stringify(fallbackChain));
+  process.env.PI_MODEL_ALIAS_MAP = customPath;
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("nested alias refs are expanded before comparing the served target", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    base: ["opencode-go/a1", "openai-codex/a2"],
+    "implementer-medium": ["alias/base", "openai-codex/gpt-6-sol"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/a1");
+  assert.equal(f.render()[1], "impl\u2192a1", "the expanded head is not a fallback");
+  f.state.statuses.set("model-alias", "openai-codex/a2");
+  assert.equal(f.render()[1], "impl\u2193a2", "a shadowed nested target is a fallback");
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a dropped nested alias makes the next ref the head", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["alias/missing", "openai-codex/gpt-6-sol"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("the served provider disambiguates a model id shared by two chain refs", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["provider-one/shared", "provider-two/shared"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "provider-one/shared");
+  assert.equal(f.render()[1], "impl\u2192shared");
+  f.state.statuses.set("model-alias", "provider-two/shared");
+  assert.equal(f.render()[1], "impl\u2193shared");
+});
+
+test("the cache recovers after a malformed map is fixed", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: "{ broken json" });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+  await writeFile(f.aliasPath, JSON.stringify(fallbackChain));
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a same-size rewrite with an unchanged mtime is still picked up", async (t) => {
+  const v1 = '{"implementer-medium":["p/aa","x/bb"]}';
+  const v2 = '{"implementer-medium":["x/bb","p/aa"]}';
+  assert.equal(v1.length, v2.length, "fixture must be a same-size rewrite");
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: v1 });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "x/bb");
+  assert.equal(f.render()[1], "impl\u2193bb");
+  const before = await stat(f.aliasPath);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await writeFile(f.aliasPath, v2);
+  // Restore the exact mtime (fractional seconds) so only ctime can signal the rewrite.
+  await utimes(f.aliasPath, before.atimeMs / 1000, before.mtimeMs / 1000);
+  assert.equal(f.render()[1], "impl\u2192bb", "the reordered chain is a cache miss");
+});
+
+test("compact alias rendering stays width-bounded on narrow terminals", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain, ansiTheme: true });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-luna");
+  for (const width of [8, 12, 24, 40]) {
+    const lines = f.rawRender(width);
+    assert.equal(lines.length, 4);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+  }
+});
+
+test("a malformed chain ref leaves the plain arrow", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["NOT-A-REF", "openai-codex/gpt-6-sol"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("a ref the producer accepts (whitespace provider) is not treated as malformed", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["my prov/model", "other/fb"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "other/fb");
+  assert.equal(f.render()[1], "impl\u2193fb");
+});
+
+test("an alias named like an Object property keeps its full name", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["model"], row2LeftSegments: [],
+    segmentOptions: { model: { aliasLabels: {} } } }, aliasMap: { constructor: ["p/head", "p/fallback"] } });
+  selectAlias(f, "constructor");
+  f.state.statuses.set("model-alias", "p/head");
+  assert.equal(f.render()[1], "constructor\u2192head");
+});
+
+const compactThinkingConfig = {
+  ...statsConfig,
+  row1LeftSegments: ["text:\u26a1", "thinking"],
+  row2LeftSegments: [],
+  segmentOptions: { model: { compactThinking: true } },
+};
+
+test("compactThinking joins the \u26a1 marker to the thinking level", async (t) => {
+  const f = await fixture(t, { config: compactThinkingConfig });
+  f.state.thinking = "low";
+  assert.equal(f.render()[1], "\u26a1low");
+});
+
+test("compactThinking joins the \u26a1 marker on a right-side row", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: ["text:LEFT"],
+    row1RightSegments: ["text:\u26a1", "thinking"], row2LeftSegments: [], row2RightSegments: [],
+    segmentOptions: { model: { compactThinking: true } } } });
+  f.state.thinking = "low";
+  const row1 = f.render()[1];
+  assert.match(row1, /\u26a1low$/);
+  assert.doesNotMatch(row1, /\u26a1 low/);
+});
+
+test("thinking keeps its space when compactThinking is off", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig,
+    row1LeftSegments: ["text:\u26a1", "thinking"], row2LeftSegments: [] } });
+  f.state.thinking = "low";
+  assert.equal(f.render()[1], "\u26a1 low");
+});
+
+const compactContextConfig = {
+  ...statsConfig,
+  row1LeftSegments: [],
+  row2LeftSegments: ["context_pct"],
+  row2RightSegments: [],
+  segmentOptions: { contextBar: { barWidth: 6, compactLabel: true } },
+};
+
+test("compactLabel renders a rounded percent without the context window", async (t) => {
+  const f = await fixture(t, { config: compactContextConfig });
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 24%");
+  f.state.leafId = "leaf-compact";
+  f.state.context = { tokens: 125, contextWindow: 1000, percent: 12.5 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 13%");
+});
+
+test("context label keeps its decimal percent and window by default", async (t) => {
+  const f = await fixture(t, { config: { ...statsConfig, row1LeftSegments: [], row2LeftSegments: ["context_pct"],
+    row2RightSegments: [], segmentOptions: { contextBar: { barWidth: 6 } } } });
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  assert.equal(f.render()[3], "\u258b\u258b\u258b\u258b\u258b\u258b 24.3% / 1.0M");
+});
+
+// The approved single-row look, exercised end to end through the real extension.
+test("approved compact layout renders short label, fallback marker, glued thinking and compact context", async (t) => {
+  const f = await fixture(t, {
+    config: {
+      row1LeftSegments: ["pi", "model", "text:\u26a1", "thinking", "separator", "context_pct", "separator", "cost"],
+      row1RightSegments: [], row2LeftSegments: [], row2RightSegments: [],
+      segmentOptions: {
+        model: { aliasLabels: { "implementer-medium": "impl" }, compactThinking: true },
+        contextBar: { barWidth: 6, compactLabel: true },
+      },
+    },
+    aliasMap: fallbackChain,
+  });
+  selectAlias(f);
+  f.state.thinking = "low";
+  f.state.context = { tokens: 240, contextWindow: 1000000, percent: 24.3 };
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.match(f.render()[1], /impl\u2192deepseek-v4\.1-flash \u26a1low \| \u258b{6} 24% \| \$0\.10$/);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.match(f.render()[1], /impl\u2193gpt-6-sol \u26a1low \| \u258b{6} 24% \| \$0\.10$/);
 });
