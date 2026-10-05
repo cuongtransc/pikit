@@ -27,7 +27,7 @@ function assistant(id, stopReason = "stop", input = 10) {
       stopReason, usage: usage(input) } };
 }
 
-async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true } = {}) {
+async function fixture(t, { config = statsConfig, entries = [assistant("a")], countAPI = true, statusAPI = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pikit-footer-"));
   const oldHome = process.env.HOME;
   process.env.HOME = root;
@@ -42,7 +42,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const state = {
     entries, branch: [assistant("active")], sessionId: "session-a", leafId: "leaf-a",
     thinking: "high", scans: 0, reads: 0, branchReads: 0, contextReads: 0,
-    statuses: new Map(),
+    statuses: new Map(), themeCalls: [],
     context: { tokens: 800, contextWindow: 2000, percent: 40 },
   };
   const manager = {
@@ -61,7 +61,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
   const loaded = await loadExtensions([extensionPath], root);
   assert.deepEqual(loaded.errors, []);
   loaded.runtime.getThinkingLevel = () => state.thinking;
-  const theme = { fg: (_name, text) => text };
+  const theme = { fg: (name, text) => { state.themeCalls.push([name, text]); return text; } };
   let component;
   const ctx = {
     cwd: root, hasUI: true, mode: "tui", sessionManager: manager,
@@ -71,7 +71,7 @@ async function fixture(t, { config = statsConfig, entries = [assistant("a")], co
     ui: { setFooter: (factory) => {
       component = factory({ requestRender() {} }, theme,
         { getGitBranch: () => null, onBranchChange: () => () => {},
-          getExtensionStatuses: () => state.statuses });
+          ...(statusAPI ? { getExtensionStatuses: () => state.statuses } : {}) });
     } },
   };
   for (const handler of loaded.extensions[0].handlers.get("session_start")) {
@@ -416,6 +416,8 @@ test("alias footer strips ANSI status colours and appends a dimmed cooldown", as
   selectAlias(f);
   f.state.statuses.set("model-alias", themedStatus("opencode-go/deepseek-v4.1-flash", "cooldown: openai-codex/gpt-6-luna 5m"));
   assert.equal(f.render()[1], "implementer-medium \u2192 deepseek-v4.1-flash \u00b7 cooldown: openai-codex/gpt-6-luna 5m");
+  assert.ok(f.state.themeCalls.some(([name, text]) => name === "dim" &&
+    text === "· cooldown: openai-codex/gpt-6-luna 5m"));
 });
 
 test("alias footer drops only the provider segment of a multi-slash target", async (t) => {
@@ -450,6 +452,13 @@ test("alias without a published status keeps the plain (alias) provider text", a
   assert.equal(f.render()[1], "implementer-medium (alias)");
 });
 
+test("alias footer tolerates hosts without an extension status API", async (t) => {
+  const f = await fixture(t, { config: aliasConfig, statusAPI: false });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "implementer-medium (alias)");
+});
+
 test("non-alias models ignore the model-alias status", async (t) => {
   const f = await fixture(t, { config: aliasConfig });
   f.ctx.model = { ...f.ctx.model, id: "sonnet", name: "Sonnet", provider: "anthropic" };
@@ -457,7 +466,7 @@ test("non-alias models ignore the model-alias status", async (t) => {
   assert.equal(f.render()[1], "Sonnet (anthropic)");
 });
 
-test("alias footer re-reads the status each frame so it never shows a stale target", async (t) => {
+test("alias footer re-reads the status on each render", async (t) => {
   const f = await fixture(t, { config: aliasConfig });
   selectAlias(f);
   f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
