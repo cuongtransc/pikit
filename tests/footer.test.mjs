@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -611,6 +611,99 @@ test("the fallback marker follows map changes after the first read", async (t) =
   assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
 });
 
+// ── Producer map forms, nested expansion and cache recovery ──────────────────
+test("an object-form alias entry with targets is accepted", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": {
+      targets: ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-sol"],
+      timeouts: { firstEventMs: 1000 },
+      cooldown: { baseMs: 60000 },
+    },
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a single-string alias entry is accepted", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": "opencode-go/deepseek-v4.1-flash",
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/deepseek-v4.1-flash");
+  assert.equal(f.render()[1], "impl\u2192deepseek-v4.1-flash");
+});
+
+test("one rejected alias entry does not disable the others", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-sol"],
+    scout: { bad: "shape" },
+    "reviewer-medium": 42,
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("nested alias refs are expanded before comparing the served target", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    base: ["opencode-go/a1", "openai-codex/a2"],
+    "implementer-medium": ["alias/base", "openai-codex/gpt-6-sol"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "opencode-go/a1");
+  assert.equal(f.render()[1], "impl\u2192a1", "the expanded head is not a fallback");
+  f.state.statuses.set("model-alias", "openai-codex/a2");
+  assert.equal(f.render()[1], "impl\u2193a2", "a shadowed nested target is a fallback");
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a dropped nested alias makes the next ref the head", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["alias/missing", "openai-codex/gpt-6-sol"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("the served provider disambiguates a model id shared by two chain refs", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: {
+    "implementer-medium": ["provider-one/shared", "provider-two/shared"],
+  } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "provider-one/shared");
+  assert.equal(f.render()[1], "impl\u2192shared");
+  f.state.statuses.set("model-alias", "provider-two/shared");
+  assert.equal(f.render()[1], "impl\u2193shared");
+});
+
+test("the cache recovers after a malformed map is fixed", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: "{ broken json" });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
+  assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+  await writeFile(f.aliasPath, JSON.stringify(fallbackChain));
+  assert.equal(f.render()[1], "impl\u2193gpt-6-sol");
+});
+
+test("a same-size rewrite with an unchanged mtime is still picked up", async (t) => {
+  const v1 = '{"implementer-medium":["p/aa","x/bb"]}';
+  const v2 = '{"implementer-medium":["x/bb","p/aa"]}';
+  assert.equal(v1.length, v2.length, "fixture must be a same-size rewrite");
+  const f = await fixture(t, { config: shortLabelConfig, aliasMap: v1 });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "x/bb");
+  assert.equal(f.render()[1], "impl\u2193bb");
+  const before = await stat(f.aliasPath);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await writeFile(f.aliasPath, v2);
+  // Restore the exact mtime (fractional seconds) so only ctime can signal the rewrite.
+  await utimes(f.aliasPath, before.atimeMs / 1000, before.mtimeMs / 1000);
+  assert.equal(f.render()[1], "impl\u2192bb", "the reordered chain is a cache miss");
+});
+
 test("compact alias rendering stays width-bounded on narrow terminals", async (t) => {
   const f = await fixture(t, { config: shortLabelConfig, aliasMap: fallbackChain, ansiTheme: true });
   selectAlias(f);
@@ -628,6 +721,14 @@ test("a malformed chain ref leaves the plain arrow", async (t) => {
   selectAlias(f);
   f.state.statuses.set("model-alias", "openai-codex/gpt-6-sol");
   assert.equal(f.render()[1], "impl\u2192gpt-6-sol");
+});
+
+test("a ref the producer accepts (whitespace provider) is not treated as malformed", async (t) => {
+  const f = await fixture(t, { config: shortLabelConfig,
+    aliasMap: { "implementer-medium": ["my prov/model", "other/fb"] } });
+  selectAlias(f);
+  f.state.statuses.set("model-alias", "other/fb");
+  assert.equal(f.render()[1], "impl\u2193fb");
 });
 
 test("an alias named like an Object property keeps its full name", async (t) => {

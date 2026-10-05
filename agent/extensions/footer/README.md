@@ -91,13 +91,17 @@ enables the fallback marker:
   keeps its full name.
 - **Fallback marker**: the footer reads the `pi-model-fallback-alias` map at
   `~/.pi/agent/model-alias.json` (`PI_CODING_AGENT_DIR` is honoured, the same way pi resolves its
-  agent dir). When the target in the `model-alias` status is not the first ref in that alias's
-  chain, it renders `label↓model` with the model in the `warning` colour. A target that is the
-  chain head, absent from a readable chain, or served while the map is missing or malformed keeps
-  the plain `label→model`. The parsed map is cached and re-read only when the file's mtime, size
-  or mode changes; a failed read is never cached, so a transient failure or a fixed permission
-  recovers on the next render. A chain containing a ref the producer would reject makes the map
-  malformed, which also keeps the plain arrow.
+  agent dir) and mirrors the producer's parser: an alias is a non-empty array of
+  `<provider>/<model>` refs, a single ref string, or an object
+  `{ "targets": [...], "timeouts": …, "cooldown": … }`. Nested `alias/<name>` refs are expanded
+  recursively before comparison, dropping unknown or cyclic nested aliases, exactly as the producer
+  does. When the served `model-alias` target is not the first ref in that expanded chain, the footer
+  renders `label↓model` with the model in the `warning` colour; a target that is the expanded chain
+  head, or is absent from a readable chain, keeps the plain `label→model`. The ref rule is the
+  producer's own `isModelRef`: a string whose first `/` is neither first nor last. A role the
+  producer would reject is skipped and only that alias loses its marker, never the whole map. The
+  parsed map is cached and re-read when the file's mtime, ctime, size or mode changes; a failed read
+  is never cached, so a transient failure or a fixed permission recovers on the next render.
 
 ```json
 {
